@@ -8,6 +8,7 @@ export interface Database {
       bookings: {
         Row: {
           booked_by: string
+          booking_secret: string
           created_at: string
           date: string
           end_time: string
@@ -20,6 +21,7 @@ export interface Database {
         }
         Insert: {
           booked_by: string
+          booking_secret: string
           created_at?: string
           date: string
           end_time: string
@@ -32,6 +34,7 @@ export interface Database {
         }
         Update: {
           booked_by?: string
+          booking_secret?: string
           created_at?: string
           date?: string
           end_time?: string

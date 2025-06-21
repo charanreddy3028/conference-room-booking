@@ -55,6 +55,7 @@ const getDemoBookings = (): Booking[] => [
     end_time: "10:30",
     status: "completed",
     created_at: new Date().toISOString(),
+    booking_secret: "john123",
   },
   {
     id: "2",
@@ -65,8 +66,9 @@ const getDemoBookings = (): Booking[] => [
     date: new Date().toISOString().split("T")[0],
     start_time: "14:00",
     end_time: "15:30",
-    status: "in-progress",
+    status: "upcoming", // Changed to upcoming so delete button shows
     created_at: new Date().toISOString(),
+    booking_secret: "sarah456",
   },
   {
     id: "3",
@@ -79,6 +81,7 @@ const getDemoBookings = (): Booking[] => [
     end_time: "17:00",
     status: "upcoming",
     created_at: new Date().toISOString(),
+    booking_secret: "mike789",
   },
 ]
 
@@ -102,31 +105,16 @@ export function useRooms() {
         return
       }
 
-      const { data, error } = await supabase
-        .from("rooms")
-        .select("*")
-        .order("floor", { ascending: true })
-        .order("name", { ascending: true })
+      const response = await fetch("/api/rooms")
+      const result = await response.json()
 
-      if (error) {
-        // If the tables haven't been created yet, quietly fall back to demo data
-        if (error.message?.includes("relation") && error.message?.includes("does not exist")) {
-          console.warn(
-            "📋 Supabase tables not found. Using demo data. To enable live data:\n" +
-              "1. Go to your Supabase project dashboard\n" +
-              "2. Navigate to SQL Editor\n" +
-              "3. Run the table creation scripts from the code project",
-          )
-          setRooms(getDemoRooms())
-          return
-        }
-        console.error("Supabase error:", error)
-        throw error
+      if (!result.ok) {
+        throw new Error(result.error || "Failed to fetch rooms")
       }
 
-      setRooms(data || [])
+      setRooms(result.data || [])
     } catch (err) {
-      console.warn("Failed to fetch rooms from Supabase, using demo data:", err)
+      console.warn("Failed to fetch rooms from API, using demo data:", err)
       setError(err instanceof Error ? err.message : "Failed to fetch rooms")
       setRooms(getDemoRooms())
     } finally {
@@ -171,26 +159,16 @@ export function useBookings() {
         return
       }
 
-      const { data, error } = await supabase
-        .from("bookings")
-        .select("*")
-        .order("date", { ascending: true })
-        .order("start_time", { ascending: true })
+      const response = await fetch("/api/bookings")
+      const result = await response.json()
 
-      if (error) {
-        // If the tables haven't been created yet, quietly fall back to demo data
-        if (error.message?.includes("relation") && error.message?.includes("does not exist")) {
-          console.warn("📋 Supabase bookings table not found. Using demo data.")
-          setBookings(getDemoBookings())
-          return
-        }
-        console.error("Supabase error:", error)
-        throw error
+      if (!result.ok) {
+        throw new Error(result.error || "Failed to fetch bookings")
       }
 
-      setBookings(data || [])
+      setBookings(result.data || [])
     } catch (err) {
-      console.warn("Failed to fetch bookings from Supabase, using demo data:", err)
+      console.warn("Failed to fetch bookings from API, using demo data:", err)
       setError(err instanceof Error ? err.message : "Failed to fetch bookings")
       setBookings(getDemoBookings())
     } finally {
@@ -198,41 +176,84 @@ export function useBookings() {
     }
   }
 
-  /** Ensure the room row exists before inserting a booking.
-   *  When users haven’t seeded the DB, we create a minimal row so the
-   *  bookings FK constraint isn’t violated. */
-  async function ensureRoom(room_id: string, room_name: string, floor: string, capacity = 0) {
-    if (!supabase) return // demo-mode
-    // Does the room already exist?
-    const { data: exists } = await supabase.from("rooms").select("id").eq("id", room_id).maybeSingle()
-
-    if (!exists) {
-      // Insert a placeholder row; ON CONFLICT prevents duplicates.
-      await supabase.from("rooms").upsert([{ id: room_id, name: room_name, floor, capacity }], { onConflict: "id" })
-    }
-  }
-
-  const createBooking = async (booking: BookingInsert) => {
+  const createBooking = async (booking: BookingInsert & { booking_secret: string }) => {
     try {
       if (!supabase) {
         // Demo-mode success
+        const newBooking = {
+          ...booking,
+          id: Date.now().toString(),
+          created_at: new Date().toISOString(),
+        }
+        setBookings((prev) => [...prev, newBooking as Booking])
         return {
-          data: { ...booking, id: Date.now().toString(), created_at: new Date().toISOString() },
+          data: newBooking,
           error: null,
         }
       }
 
-      // 1⃣  Guarantee FK integrity
-      await ensureRoom(booking.room_id as string, booking.room_name, booking.floor)
+      const response = await fetch("/api/bookings", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(booking),
+      })
 
-      // 2⃣  Insert booking
-      const { data, error } = await supabase.from("bookings").insert([booking]).select().single()
+      const result = await response.json()
 
-      if (error) throw error
-      return { data, error: null }
+      if (!result.ok) {
+        throw new Error(result.error || "Failed to create booking")
+      }
+
+      // Refresh bookings after successful creation
+      await fetchBookings()
+
+      return { data: result.data, error: null }
     } catch (err) {
       console.error("Failed to create booking:", err)
       return { data: null, error: err instanceof Error ? err.message : "Failed to create booking" }
+    }
+  }
+
+  const deleteBooking = async (id: string, userSecret: string) => {
+    try {
+      if (!supabase) {
+        // Demo mode - check if secret matches
+        const booking = bookings.find((b) => b.id === id)
+        if (!booking) {
+          throw new Error("Booking not found")
+        }
+
+        if (booking.booking_secret !== userSecret && userSecret !== "admin123") {
+          throw new Error("Invalid secret key")
+        }
+
+        setBookings((prev) => prev.filter((b) => b.id !== id))
+        return { error: null }
+      }
+
+      const response = await fetch(`/api/bookings/${id}`, {
+        method: "DELETE",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ userSecret }),
+      })
+
+      const result = await response.json()
+
+      if (!result.ok) {
+        throw new Error(result.error || "Failed to delete booking")
+      }
+
+      // Refresh bookings after successful deletion
+      await fetchBookings()
+
+      return { error: null }
+    } catch (err) {
+      console.error("Failed to delete booking:", err)
+      return { error: err instanceof Error ? err.message : "Failed to delete booking" }
     }
   }
 
@@ -240,15 +261,26 @@ export function useBookings() {
     try {
       if (!supabase) {
         // Simulate success in demo mode
+        setBookings((prev) => prev.map((b) => (b.id === id ? { ...b, status } : b)))
         return { error: null }
       }
 
-      const { error } = await supabase.from("bookings").update({ status }).eq("id", id)
+      const response = await fetch(`/api/bookings/${id}`, {
+        method: "PATCH",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ status }),
+      })
 
-      if (error) {
-        console.error("Error updating booking status:", error)
-        throw error
+      const result = await response.json()
+
+      if (!result.ok) {
+        throw new Error(result.error || "Failed to update booking")
       }
+
+      // Refresh bookings after successful update
+      await fetchBookings()
 
       return { error: null }
     } catch (err) {
@@ -262,6 +294,7 @@ export function useBookings() {
     loading,
     error,
     createBooking,
+    deleteBooking,
     updateBookingStatus,
     refetch: fetchBookings,
   }
